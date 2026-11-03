@@ -198,12 +198,12 @@
             <button id="start-button" type="button">시작</button>
             <div class="status-list" aria-live="polite">
                 <div class="status-line"><span id="mic-dot" class="dot" aria-hidden="true"></span><span id="mic-status">시작 버튼을 누르면 마이크가 켜집니다</span></div>
-                <div class="status-line">인식된 소리: <span id="detected-sound" class="detection">-</span></div>
-                <div class="status-line debug-line">
-                    <span>박수 확률</span><strong id="clap-probability">0.00</strong>
-                    <span>준비 상태</span><strong id="clap-armed">준비</strong>
-                    <span>인식 횟수</span><strong id="clap-count">0</strong>
-                    <span>마지막 판단 후 지난 시간(ms)</span><strong id="decision-age">대기</strong>
+                <div class="status-line">모델 인식: <span id="detected-sound" class="detection">-</span></div>
+                <div class="status-line debug-line" aria-live="off">
+                    <span>현재 음량</span><strong id="current-volume">0.000</strong>
+                    <span>증가 배율</span><strong id="onset-ratio">0.00x</strong>
+                    <span>높은 음역 비율</span><strong id="hf-ratio">0.0%</strong>
+                    <span>마지막 점프 감지 시각</span><strong id="last-jump-time">-</strong>
                 </div>
             </div>
         </section>
@@ -213,9 +213,10 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.4.0/dist/speech-commands.min.js"></script>
     <script>
-        const CLAP_JUMP_THRESHOLD = 0.35;
-        const CLAP_REARM_THRESHOLD = 0.15;
-        const CLAP_MIN_INTERVAL_MS = 800;
+        const VOLUME_ON = 0.2;
+        const ONSET_RATIO = 4;
+        const HF_RATIO = 0.35;
+        const MIN_GAP = 0.35;
         const URL = location.href.substring(0, location.href.lastIndexOf("/") + 1) + "my_model/";
         const WIDTH = 800;
         const HEIGHT = 300;
@@ -233,10 +234,10 @@
         const micStatusElement = document.getElementById("mic-status");
         const micDotElement = document.getElementById("mic-dot");
         const detectedSoundElement = document.getElementById("detected-sound");
-        const clapProbabilityElement = document.getElementById("clap-probability");
-        const clapArmedElement = document.getElementById("clap-armed");
-        const clapCountElement = document.getElementById("clap-count");
-        const decisionAgeElement = document.getElementById("decision-age");
+        const currentVolumeElement = document.getElementById("current-volume");
+        const onsetRatioElement = document.getElementById("onset-ratio");
+        const hfRatioElement = document.getElementById("hf-ratio");
+        const lastJumpTimeElement = document.getElementById("last-jump-time");
         const errorElement = document.getElementById("error-message");
 
         let gameState = "ready";
@@ -248,13 +249,20 @@
         let jumpHeight = 0;
         let jumpVelocity = 0;
         let lastJumpAt = -Infinity;
-        let lastDecisionAt = null;
-        let clapArmed = true;
-        let clapCount = 0;
+        let lastJumpDetectedAt = null;
+        let audioContext = null;
+        let analyser = null;
+        let microphoneSource = null;
+        let microphoneStream = null;
+        let timeDomainData = null;
+        let frequencyData = null;
+        let volumeHistory = [];
+        let currentVolume = 0;
+        let currentOnsetRatio = 0;
+        let currentHighFrequencyRatio = 0;
         let previousFrame = 0;
         let recognizer = null;
         let classLabels = [];
-        let clapIndex = -1;
         let audioLoading = false;
         let isListening = false;
 
@@ -275,14 +283,13 @@
 
         function jump() {
             const now = performance.now();
-            if (gameState !== "running" || jumpHeight > 0 || now - lastJumpAt < CLAP_MIN_INTERVAL_MS) return false;
+            if (gameState !== "running" || jumpHeight > 0 || now - lastJumpAt < MIN_GAP * 1000) return false;
             jumpVelocity = 610;
             lastJumpAt = now;
             return true;
         }
 
         function updateDetection(result) {
-            lastDecisionAt = performance.now();
             let highestIndex = 0;
             for (let index = 1; index < result.scores.length; index += 1) {
                 if (result.scores[index] > result.scores[highestIndex]) highestIndex = index;
@@ -291,18 +298,103 @@
             const confidence = result.scores[highestIndex];
             const label = classLabels[highestIndex] || "알 수 없음";
             detectedSoundElement.textContent = label + " " + confidence.toFixed(2);
+        }
 
-            const clapConfidence = clapIndex >= 0 ? result.scores[clapIndex] : 0;
-            clapProbabilityElement.textContent = clapConfidence.toFixed(2);
-            if (clapConfidence < CLAP_REARM_THRESHOLD) {
-                clapArmed = true;
-                clapArmedElement.textContent = "준비";
-            } else if (clapConfidence >= CLAP_JUMP_THRESHOLD && highestIndex === clapIndex && clapArmed) {
-                clapArmed = false;
-                clapArmedElement.textContent = "대기";
-                clapCount += 1;
-                clapCountElement.textContent = String(clapCount);
-                jump();
+        async function startMicrophoneAnalysis() {
+            try {
+                const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextConstructor || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("이 브라우저에서 오디오 입력을 사용할 수 없습니다.");
+                }
+
+                audioContext = new AudioContextConstructor();
+                await audioContext.resume();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                if (gameState !== "running") {
+                    stream.getTracks().forEach(track => track.stop());
+                    return;
+                }
+
+                microphoneStream = stream;
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 1024;
+                microphoneSource = audioContext.createMediaStreamSource(microphoneStream);
+                microphoneSource.connect(analyser);
+                timeDomainData = new Uint8Array(analyser.fftSize);
+                frequencyData = new Float32Array(analyser.frequencyBinCount);
+                setMicStatus("마이크 켜짐", true);
+            } catch (error) {
+                stopMicrophoneAnalysis();
+                if (gameState === "running") {
+                    setMicStatus("마이크를 시작할 수 없습니다", false);
+                    errorElement.textContent = "오류: " + (error.message || String(error));
+                }
+            }
+        }
+
+        function stopMicrophoneAnalysis() {
+            if (microphoneSource) {
+                microphoneSource.disconnect();
+                microphoneSource = null;
+            }
+            if (microphoneStream) {
+                microphoneStream.getTracks().forEach(track => track.stop());
+                microphoneStream = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            analyser = null;
+            timeDomainData = null;
+            frequencyData = null;
+            volumeHistory = [];
+            currentVolume = 0;
+            currentOnsetRatio = 0;
+            currentHighFrequencyRatio = 0;
+        }
+
+        function analyzeMicrophone(timestamp) {
+            if (!analyser || !audioContext || !timeDomainData || !frequencyData) return;
+
+            analyser.getByteTimeDomainData(timeDomainData);
+            currentVolume = 0;
+            for (const sample of timeDomainData) {
+                currentVolume = Math.max(currentVolume, Math.abs(sample - 128) / 128);
+            }
+
+            while (volumeHistory.length && timestamp - volumeHistory[0].timestamp > 100) {
+                volumeHistory.shift();
+            }
+            const averageVolume = volumeHistory.length
+                ? volumeHistory.reduce((total, sample) => total + sample.volume, 0) / volumeHistory.length
+                : 0;
+            currentOnsetRatio = currentVolume / Math.max(averageVolume, 0.005);
+            volumeHistory.push({ timestamp, volume: currentVolume });
+
+            analyser.getFloatFrequencyData(frequencyData);
+            const binWidth = audioContext.sampleRate / analyser.fftSize;
+            let totalEnergy = 0;
+            let highFrequencyEnergy = 0;
+            for (let bin = 0; bin < frequencyData.length; bin += 1) {
+                const decibels = frequencyData[bin];
+                if (!Number.isFinite(decibels)) continue;
+                const energy = Math.pow(10, decibels / 10);
+                totalEnergy += energy;
+                if (bin * binWidth >= 2000) highFrequencyEnergy += energy;
+            }
+            currentHighFrequencyRatio = totalEnergy > 0 ? highFrequencyEnergy / totalEnergy : 0;
+
+            currentVolumeElement.textContent = currentVolume.toFixed(3);
+            onsetRatioElement.textContent = currentOnsetRatio.toFixed(2) + "x";
+            hfRatioElement.textContent = (currentHighFrequencyRatio * 100).toFixed(1) + "%";
+
+            if (currentVolume >= VOLUME_ON && currentOnsetRatio >= ONSET_RATIO && currentHighFrequencyRatio >= HF_RATIO) {
+                if (jump()) {
+                    const detectedAt = new Date();
+                    lastJumpDetectedAt = detectedAt.getTime();
+                    lastJumpTimeElement.textContent = detectedAt.toLocaleTimeString("ko-KR", { hour12: false }) + "." + String(detectedAt.getMilliseconds()).padStart(3, "0");
+                }
             }
         }
 
@@ -344,8 +436,6 @@
                     );
                     await loadedRecognizer.ensureModelLoaded();
                     classLabels = loadedRecognizer.wordLabels();
-                    clapIndex = classLabels.indexOf("박수");
-                    if (clapIndex < 0) throw new Error("모델에서 '박수' 클래스를 찾을 수 없습니다.");
                     recognizer = loadedRecognizer;
                 }
                 await startListening();
@@ -367,23 +457,24 @@
             jumpHeight = 0;
             jumpVelocity = 0;
             lastJumpAt = -Infinity;
-            lastDecisionAt = null;
-            decisionAgeElement.textContent = "대기";
-            clapArmed = true;
-            clapCount = 0;
-            clapProbabilityElement.textContent = "0.00";
-            clapArmedElement.textContent = "준비";
-            clapCountElement.textContent = "0";
+            lastJumpDetectedAt = null;
+            lastJumpTimeElement.textContent = "-";
+            volumeHistory = [];
+            currentVolume = 0;
+            currentOnsetRatio = 0;
+            currentHighFrequencyRatio = 0;
             scoreElement.textContent = "0";
             errorElement.textContent = "";
             startButton.textContent = "진행 중";
             startButton.disabled = true;
+            startMicrophoneAnalysis();
             startAudio();
         }
 
         function endGame() {
             gameState = "over";
             stopListening();
+            stopMicrophoneAnalysis();
             startButton.textContent = "다시 시작";
             startButton.disabled = false;
         }
@@ -541,7 +632,7 @@
         function frame(timestamp) {
             const delta = previousFrame ? Math.min((timestamp - previousFrame) / 1000, 0.04) : 0;
             previousFrame = timestamp;
-            decisionAgeElement.textContent = lastDecisionAt === null ? "대기" : String(Math.floor(timestamp - lastDecisionAt));
+            analyzeMicrophone(timestamp);
             update(delta);
             draw();
             requestAnimationFrame(frame);
@@ -557,6 +648,6 @@
 
         requestAnimationFrame(frame);
     </script>
-    <!-- 박수 점프 기준, 재준비 기준, 최소 점프 간격은 CLAP_JUMP_THRESHOLD, CLAP_REARM_THRESHOLD, CLAP_MIN_INTERVAL_MS 상수에서 바꾸세요. -->
+    <!-- 직접 박수 감지 기준은 VOLUME_ON, ONSET_RATIO, HF_RATIO, MIN_GAP 상수에서 바꾸세요. -->
 </body>
 </html>
