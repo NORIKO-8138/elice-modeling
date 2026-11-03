@@ -204,6 +204,9 @@
                     <span>증가 배율</span><strong id="onset-ratio">0.00x</strong>
                     <span>높은 음역 비율</span><strong id="hf-ratio">0.0%</strong>
                     <span>마지막 점프 감지 시각</span><strong id="last-jump-time">-</strong>
+                    <span>마지막 판단 후 지난 시간</span><strong id="decision-age">대기</strong>
+                    <span>박수 횟수</span><strong id="clap-count">0</strong>
+                    <span>최근 감지</span><strong id="recent-detections">-</strong>
                 </div>
             </div>
         </section>
@@ -217,6 +220,7 @@
         const ONSET_RATIO = 4;
         const HF_RATIO = 0.35;
         const MIN_GAP = 0.35;
+        const RECENT_DETECTION_LIMIT = 5;
         const URL = location.href.substring(0, location.href.lastIndexOf("/") + 1) + "my_model/";
         const WIDTH = 800;
         const HEIGHT = 300;
@@ -238,6 +242,9 @@
         const onsetRatioElement = document.getElementById("onset-ratio");
         const hfRatioElement = document.getElementById("hf-ratio");
         const lastJumpTimeElement = document.getElementById("last-jump-time");
+        const decisionAgeElement = document.getElementById("decision-age");
+        const clapCountElement = document.getElementById("clap-count");
+        const recentDetectionsElement = document.getElementById("recent-detections");
         const errorElement = document.getElementById("error-message");
 
         let gameState = "ready";
@@ -250,10 +257,16 @@
         let jumpVelocity = 0;
         let lastJumpAt = -Infinity;
         let lastJumpDetectedAt = null;
+        let lastDecisionAt = null;
+        let frozenDecisionAge = null;
+        let clapCount = 0;
+        let recentDetections = [];
+        let gameFrameId = null;
         let audioContext = null;
         let analyser = null;
         let microphoneSource = null;
         let microphoneStream = null;
+        let microphoneStartPromise = null;
         let timeDomainData = null;
         let frequencyData = null;
         let volumeHistory = [];
@@ -265,6 +278,7 @@
         let classLabels = [];
         let audioLoading = false;
         let isListening = false;
+        let listenStartPromise = null;
 
         bestScoreElement.textContent = String(bestScore);
 
@@ -290,6 +304,7 @@
         }
 
         function updateDetection(result) {
+            if (gameState !== "running") return;
             let highestIndex = 0;
             for (let index = 1; index < result.scores.length; index += 1) {
                 if (result.scores[index] > result.scores[highestIndex]) highestIndex = index;
@@ -301,35 +316,41 @@
         }
 
         async function startMicrophoneAnalysis() {
-            try {
-                const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
-                if (!AudioContextConstructor || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    throw new Error("이 브라우저에서 오디오 입력을 사용할 수 없습니다.");
-                }
-
-                audioContext = new AudioContextConstructor();
-                await audioContext.resume();
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                if (gameState !== "running") {
-                    stream.getTracks().forEach(track => track.stop());
-                    return;
-                }
-
-                microphoneStream = stream;
-                analyser = audioContext.createAnalyser();
-                analyser.fftSize = 1024;
-                microphoneSource = audioContext.createMediaStreamSource(microphoneStream);
-                microphoneSource.connect(analyser);
-                timeDomainData = new Uint8Array(analyser.fftSize);
-                frequencyData = new Float32Array(analyser.frequencyBinCount);
-                setMicStatus("마이크 켜짐", true);
-            } catch (error) {
-                stopMicrophoneAnalysis();
-                if (gameState === "running") {
-                    setMicStatus("마이크를 시작할 수 없습니다", false);
-                    errorElement.textContent = "오류: " + (error.message || String(error));
-                }
+            if (gameState !== "running") return;
+            if (microphoneStream && analyser && audioContext) {
+                if (audioContext.state === "suspended") await audioContext.resume();
+                return;
             }
+            if (microphoneStartPromise) return microphoneStartPromise;
+
+            microphoneStartPromise = (async () => {
+                try {
+                    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+                    if (!AudioContextConstructor || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                        throw new Error("이 브라우저에서 오디오 입력을 사용할 수 없습니다.");
+                    }
+
+                    audioContext = new AudioContextConstructor();
+                    await audioContext.resume();
+                    microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 1024;
+                    microphoneSource = audioContext.createMediaStreamSource(microphoneStream);
+                    microphoneSource.connect(analyser);
+                    timeDomainData = new Uint8Array(analyser.fftSize);
+                    frequencyData = new Float32Array(analyser.frequencyBinCount);
+                    if (gameState === "running") setMicStatus("마이크 켜짐", true);
+                } catch (error) {
+                    stopMicrophoneAnalysis();
+                    if (gameState === "running") {
+                        setMicStatus("마이크를 시작할 수 없습니다", false);
+                        errorElement.textContent = "오류: " + (error.message || String(error));
+                    }
+                } finally {
+                    microphoneStartPromise = null;
+                }
+            })();
+            return microphoneStartPromise;
         }
 
         function stopMicrophoneAnalysis() {
@@ -355,7 +376,8 @@
         }
 
         function analyzeMicrophone(timestamp) {
-            if (!analyser || !audioContext || !timeDomainData || !frequencyData) return;
+            if (gameState !== "running" || !analyser || !audioContext || !timeDomainData || !frequencyData) return;
+            lastDecisionAt = timestamp;
 
             analyser.getByteTimeDomainData(timeDomainData);
             currentVolume = 0;
@@ -394,20 +416,31 @@
                     const detectedAt = new Date();
                     lastJumpDetectedAt = detectedAt.getTime();
                     lastJumpTimeElement.textContent = detectedAt.toLocaleTimeString("ko-KR", { hour12: false }) + "." + String(detectedAt.getMilliseconds()).padStart(3, "0");
+                    clapCount += 1;
+                    recentDetections.unshift(lastJumpTimeElement.textContent);
+                    recentDetections = recentDetections.slice(0, RECENT_DETECTION_LIMIT);
+                    clapCountElement.textContent = String(clapCount);
+                    recentDetectionsElement.textContent = recentDetections.join(" · ");
                 }
             }
         }
 
         async function startListening() {
-            if (!recognizer || isListening || gameState !== "running") return;
-            await recognizer.listen(updateDetection, {
+            if (!recognizer || isListening || listenStartPromise || gameState !== "running") return;
+            const pendingListen = recognizer.listen(updateDetection, {
                 probabilityThreshold: 0,
                 invokeCallbackOnNoiseAndUnknown: true,
                 overlapFactor: 0.9
             });
-            isListening = true;
-            if (gameState !== "running") stopListening();
-            else setMicStatus("마이크 켜짐", true);
+            listenStartPromise = pendingListen;
+            try {
+                await pendingListen;
+                isListening = true;
+                if (gameState !== "running") stopListening();
+                else setMicStatus("마이크 켜짐", true);
+            } finally {
+                if (listenStartPromise === pendingListen) listenStartPromise = null;
+            }
         }
 
         function stopListening() {
@@ -440,14 +473,20 @@
                 }
                 await startListening();
             } catch (error) {
-                setMicStatus("마이크를 시작할 수 없습니다", false);
-                errorElement.textContent = "오류: " + (error.message || String(error));
+                if (gameState === "running") {
+                    setMicStatus("마이크를 시작할 수 없습니다", false);
+                    errorElement.textContent = "오류: " + (error.message || String(error));
+                }
             } finally {
                 audioLoading = false;
             }
         }
 
         function startGame() {
+            if (gameFrameId !== null) {
+                cancelAnimationFrame(gameFrameId);
+                gameFrameId = null;
+            }
             stopListening();
             gameState = "running";
             score = 0;
@@ -458,7 +497,14 @@
             jumpVelocity = 0;
             lastJumpAt = -Infinity;
             lastJumpDetectedAt = null;
+            lastDecisionAt = null;
+            frozenDecisionAge = null;
+            clapCount = 0;
+            recentDetections = [];
             lastJumpTimeElement.textContent = "-";
+            decisionAgeElement.textContent = "대기";
+            clapCountElement.textContent = "0";
+            recentDetectionsElement.textContent = "-";
             volumeHistory = [];
             currentVolume = 0;
             currentOnsetRatio = 0;
@@ -469,12 +515,17 @@
             startButton.disabled = true;
             startMicrophoneAnalysis();
             startAudio();
+            scheduleGameFrame();
         }
 
         function endGame() {
+            if (gameState !== "running") return;
             gameState = "over";
+            frozenDecisionAge = lastDecisionAt === null ? null : Math.max(0, Math.floor(performance.now() - lastDecisionAt));
+            decisionAgeElement.textContent = frozenDecisionAge === null
+                ? "기록 없음 (게임 종료)"
+                : frozenDecisionAge.toLocaleString("ko-KR") + "ms (게임 종료)";
             stopListening();
-            stopMicrophoneAnalysis();
             startButton.textContent = "다시 시작";
             startButton.disabled = false;
         }
@@ -629,16 +680,35 @@
             }
         }
 
+        function updateDecisionAge(timestamp) {
+            if (gameState !== "running" || lastDecisionAt === null) return;
+            const elapsedSinceDecision = Math.max(0, Math.floor(timestamp - lastDecisionAt));
+            decisionAgeElement.textContent = elapsedSinceDecision.toLocaleString("ko-KR") + "ms";
+        }
+
+        function scheduleGameFrame() {
+            if (gameFrameId === null && gameState !== "over") {
+                gameFrameId = requestAnimationFrame(frame);
+            }
+        }
+
         function frame(timestamp) {
+            gameFrameId = null;
+            if (gameState === "over") return;
             const delta = previousFrame ? Math.min((timestamp - previousFrame) / 1000, 0.04) : 0;
             previousFrame = timestamp;
-            analyzeMicrophone(timestamp);
+            if (gameState === "running") analyzeMicrophone(timestamp);
+            updateDecisionAge(timestamp);
             update(delta);
             draw();
-            requestAnimationFrame(frame);
+            scheduleGameFrame();
         }
 
         startButton.addEventListener("click", startGame);
+        window.addEventListener("pagehide", () => {
+            stopListening();
+            stopMicrophoneAnalysis();
+        });
         window.addEventListener("keydown", event => {
             if (event.code === "Space" && !event.repeat) {
                 event.preventDefault();
@@ -646,7 +716,7 @@
             }
         });
 
-        requestAnimationFrame(frame);
+        scheduleGameFrame();
     </script>
     <!-- 직접 박수 감지 기준은 VOLUME_ON, ONSET_RATIO, HF_RATIO, MIN_GAP 상수에서 바꾸세요. -->
 </body>
