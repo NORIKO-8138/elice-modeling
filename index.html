@@ -1,58 +1,532 @@
-<div>Teachable Machine Audio Model</div>
-<button type="button" onclick="init()">Start</button>
-<div id="label-container"></div>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.4.0/dist/speech-commands.min.js"></script>
-
-<script type="text/javascript">
-    // more documentation available at
-    // https://github.com/tensorflow/tfjs-models/tree/master/speech-commands
-
-    // the link to your model provided by Teachable Machine export panel
-    const URL = location.href.substring(0, location.href.lastIndexOf("/") + 1) + "my_model/";
-
-    async function createModel() {
-        const checkpointURL = URL + "model.json"; // model topology
-        const metadataURL = URL + "metadata.json"; // model metadata
-
-        const recognizer = speechCommands.create(
-            "BROWSER_FFT", // fourier transform type, not useful to change
-            undefined, // speech commands vocabulary feature, not useful for your models
-            checkpointURL,
-            metadataURL);
-
-        // check that model and metadata are loaded via HTTPS requests.
-        await recognizer.ensureModelLoaded();
-
-        return recognizer;
-    }
-
-    async function init() {
-        const recognizer = await createModel();
-        const classLabels = recognizer.wordLabels(); // get class labels
-        const labelContainer = document.getElementById("label-container");
-        for (let i = 0; i < classLabels.length; i++) {
-            labelContainer.appendChild(document.createElement("div"));
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5fbff">
+    <title>박수 점프</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --ink: #203647;
+            --muted: #647d8b;
+            --paper: #f5fbff;
+            --sky: #dff5ff;
+            --coral: #ff765f;
+            --yellow: #ffd35a;
+            --green: #64c99a;
+            --red: #c62828;
         }
 
-        // listen() takes two arguments:
-        // 1. A callback function that is invoked anytime a word is recognized.
-        // 2. A configuration object with adjustable fields
-        recognizer.listen(result => {
-            const scores = result.scores; // probability of prediction for each class
-            // render the probability scores per class
-            for (let i = 0; i < classLabels.length; i++) {
-                const classPrediction = classLabels[i] + ": " + result.scores[i].toFixed(2);
-                labelContainer.childNodes[i].innerHTML = classPrediction;
+        * { box-sizing: border-box; }
+
+        body {
+            min-width: 320px;
+            min-height: 100vh;
+            margin: 0;
+            padding: 28px 20px 36px;
+            color: var(--ink);
+            background-color: var(--paper);
+            background-image: radial-gradient(#b8dce8 0.8px, transparent 0.8px);
+            background-size: 20px 20px;
+            font-family: "Trebuchet MS", "Malgun Gothic", sans-serif;
+        }
+
+        main {
+            width: min(800px, 100%);
+            margin: 0 auto;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 16px;
+        }
+
+        h1 {
+            margin: 0;
+            color: #173c50;
+            font-size: 32px;
+            line-height: 1.1;
+        }
+
+        .subtitle {
+            margin: 7px 0 0;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .scores {
+            display: flex;
+            gap: 10px;
+        }
+
+        .score-box {
+            min-width: 92px;
+            padding: 9px 13px 8px;
+            border: 2px solid #c5e1e9;
+            border-radius: 8px;
+            background: #fff;
+            text-align: center;
+        }
+
+        .score-box span {
+            display: block;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .score-box strong {
+            display: block;
+            margin-top: 2px;
+            font-size: 23px;
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .game-frame {
+            overflow: hidden;
+            border: 3px solid #284e5d;
+            border-radius: 8px;
+            background: var(--sky);
+            box-shadow: 0 6px 0 #c6e0e5;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: auto;
+            aspect-ratio: 8 / 3;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px 18px;
+            margin-top: 22px;
+        }
+
+        button {
+            min-width: 112px;
+            min-height: 46px;
+            padding: 10px 20px;
+            border: 0;
+            border-radius: 7px;
+            color: #fff;
+            background: #e85f4b;
+            box-shadow: 0 4px 0 #b94638;
+            font: inherit;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        button:hover:not(:disabled) { background: #d9503e; }
+        button:active:not(:disabled) { transform: translateY(3px); box-shadow: 0 1px 0 #b94638; }
+        button:focus-visible { outline: 3px solid #23869a; outline-offset: 3px; }
+        button:disabled { cursor: default; opacity: 0.7; }
+
+        .status-list {
+            display: grid;
+            gap: 5px;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .status-line {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 20px;
+        }
+
+        .dot {
+            width: 9px;
+            height: 9px;
+            flex: 0 0 auto;
+            border-radius: 50%;
+            background: #a7b7bf;
+        }
+
+        .dot.live { background: #34ad75; box-shadow: 0 0 0 3px #d5f3e3; }
+        .detection { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+        .error {
+            min-height: 20px;
+            margin: 12px 0 0;
+            color: var(--red);
+            font-size: 14px;
+            font-weight: 700;
+            overflow-wrap: anywhere;
+        }
+
+        @media (max-width: 540px) {
+            body { padding: 20px 12px 28px; }
+            .topbar { align-items: flex-start; flex-direction: column; gap: 13px; }
+            h1 { font-size: 29px; }
+            .scores { width: 100%; }
+            .score-box { flex: 1; }
+            .controls { align-items: flex-start; }
+            .status-list { padding-top: 2px; }
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <header class="topbar">
+            <div>
+                <h1>박수 점프</h1>
+                <p class="subtitle">박수로 장애물을 피하세요!</p>
+            </div>
+            <div class="scores" aria-label="점수">
+                <div class="score-box"><span>점수</span><strong id="score">0</strong></div>
+                <div class="score-box"><span>최고 점수</span><strong id="best-score">0</strong></div>
+            </div>
+        </header>
+
+        <div class="game-frame">
+            <canvas id="game" width="800" height="300" aria-label="박수를 치거나 스페이스바를 눌러 장애물을 피하는 게임"></canvas>
+        </div>
+
+        <section class="controls" aria-label="게임 및 마이크">
+            <button id="start-button" type="button">시작</button>
+            <div class="status-list" aria-live="polite">
+                <div class="status-line"><span id="mic-dot" class="dot" aria-hidden="true"></span><span id="mic-status">시작 버튼을 누르면 마이크가 켜집니다</span></div>
+                <div class="status-line">인식된 소리: <span id="detected-sound" class="detection">-</span></div>
+            </div>
+        </section>
+        <p id="error-message" class="error" role="alert"></p>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.4.0/dist/speech-commands.min.js"></script>
+    <script>
+        const URL = location.href.substring(0, location.href.lastIndexOf("/") + 1) + "my_model/";
+        const CLAP_THRESHOLD = 0.85;
+        const JUMP_COOLDOWN_MS = 600;
+        const WIDTH = 800;
+        const HEIGHT = 300;
+        const GROUND_Y = 252;
+        const PLAYER_X = 108;
+        const PLAYER_WIDTH = 40;
+        const PLAYER_HEIGHT = 48;
+        const BEST_SCORE_KEY = "clap-jump-best-score";
+
+        const canvas = document.getElementById("game");
+        const context = canvas.getContext("2d");
+        const startButton = document.getElementById("start-button");
+        const scoreElement = document.getElementById("score");
+        const bestScoreElement = document.getElementById("best-score");
+        const micStatusElement = document.getElementById("mic-status");
+        const micDotElement = document.getElementById("mic-dot");
+        const detectedSoundElement = document.getElementById("detected-sound");
+        const errorElement = document.getElementById("error-message");
+
+        let gameState = "ready";
+        let score = 0;
+        let bestScore = readBestScore();
+        let elapsed = 0;
+        let spawnTimer = 0.8;
+        let obstacles = [];
+        let jumpHeight = 0;
+        let jumpVelocity = 0;
+        let lastJumpAt = -Infinity;
+        let clapLatched = false;
+        let previousFrame = 0;
+        let recognizer = null;
+        let classLabels = [];
+        let clapIndex = -1;
+        let audioLoading = false;
+        let isListening = false;
+
+        bestScoreElement.textContent = String(bestScore);
+
+        function readBestScore() {
+            try {
+                return Number(localStorage.getItem(BEST_SCORE_KEY)) || 0;
+            } catch (error) {
+                return 0;
             }
-        }, {
-            includeSpectrogram: true, // in case listen should return result.spectrogram
-            probabilityThreshold: 0.75,
-            invokeCallbackOnNoiseAndUnknown: true,
-            overlapFactor: 0.50 // probably want between 0.5 and 0.75. More info in README
+        }
+
+        function setMicStatus(message, live) {
+            micStatusElement.textContent = message;
+            micDotElement.classList.toggle("live", live);
+        }
+
+        function jump() {
+            const now = performance.now();
+            if (gameState !== "running" || jumpHeight > 0 || now - lastJumpAt < JUMP_COOLDOWN_MS) return false;
+            jumpVelocity = 610;
+            lastJumpAt = now;
+            return true;
+        }
+
+        function updateDetection(result) {
+            let highestIndex = 0;
+            for (let index = 1; index < result.scores.length; index += 1) {
+                if (result.scores[index] > result.scores[highestIndex]) highestIndex = index;
+            }
+
+            const confidence = result.scores[highestIndex];
+            const label = classLabels[highestIndex] || "알 수 없음";
+            detectedSoundElement.textContent = label + " " + confidence.toFixed(2);
+
+            const clapConfidence = clapIndex >= 0 ? result.scores[clapIndex] : 0;
+            if (clapConfidence < CLAP_THRESHOLD) clapLatched = false;
+            if (clapConfidence >= CLAP_THRESHOLD && !clapLatched) {
+                clapLatched = true;
+                jump();
+            }
+        }
+
+        async function startListening() {
+            if (!recognizer || isListening || gameState !== "running") return;
+            await recognizer.listen(updateDetection, {
+                probabilityThreshold: 0.5,
+                invokeCallbackOnNoiseAndUnknown: true,
+                overlapFactor: 0.5
+            });
+            isListening = true;
+            if (gameState !== "running") stopListening();
+            else setMicStatus("마이크 켜짐", true);
+        }
+
+        function stopListening() {
+            if (recognizer && isListening) {
+                recognizer.stopListening();
+                isListening = false;
+            }
+            if (gameState !== "running") setMicStatus("마이크 꺼짐", false);
+        }
+
+        async function startAudio() {
+            if (audioLoading) return;
+            audioLoading = true;
+            errorElement.textContent = "";
+            setMicStatus("모델 불러오는 중...", false);
+
+            try {
+                if (!recognizer) {
+                    const checkpointURL = URL + "model.json";
+                    const metadataURL = URL + "metadata.json";
+                    const loadedRecognizer = speechCommands.create(
+                        "BROWSER_FFT",
+                        undefined,
+                        checkpointURL,
+                        metadataURL
+                    );
+                    await loadedRecognizer.ensureModelLoaded();
+                    classLabels = loadedRecognizer.wordLabels();
+                    clapIndex = classLabels.indexOf("박수");
+                    if (clapIndex < 0) throw new Error("모델에서 '박수' 클래스를 찾을 수 없습니다.");
+                    recognizer = loadedRecognizer;
+                }
+                await startListening();
+            } catch (error) {
+                setMicStatus("마이크를 시작할 수 없습니다", false);
+                errorElement.textContent = "오류: " + (error.message || String(error));
+            } finally {
+                audioLoading = false;
+            }
+        }
+
+        function startGame() {
+            stopListening();
+            gameState = "running";
+            score = 0;
+            elapsed = 0;
+            spawnTimer = 0.8;
+            obstacles = [];
+            jumpHeight = 0;
+            jumpVelocity = 0;
+            lastJumpAt = -Infinity;
+            clapLatched = false;
+            scoreElement.textContent = "0";
+            errorElement.textContent = "";
+            startButton.textContent = "진행 중";
+            startButton.disabled = true;
+            startAudio();
+        }
+
+        function endGame() {
+            gameState = "over";
+            stopListening();
+            startButton.textContent = "다시 시작";
+            startButton.disabled = false;
+        }
+
+        function addObstacle() {
+            const height = 38 + Math.random() * 27;
+            obstacles.push({
+                x: WIDTH + 10,
+                width: 25 + Math.random() * 13,
+                height,
+                passed: false
+            });
+        }
+
+        function update(delta) {
+            if (gameState !== "running") return;
+            elapsed += delta;
+            const speed = 285 + Math.min(elapsed * 8, 205);
+
+            jumpHeight += jumpVelocity * delta;
+            jumpVelocity -= 1650 * delta;
+            if (jumpHeight <= 0) {
+                jumpHeight = 0;
+                jumpVelocity = 0;
+            }
+
+            spawnTimer -= delta;
+            if (spawnTimer <= 0) {
+                addObstacle();
+                spawnTimer = 1.2 + Math.random() * 0.5;
+            }
+
+            const playerTop = GROUND_Y - PLAYER_HEIGHT - jumpHeight;
+            for (const obstacle of obstacles) {
+                obstacle.x -= speed * delta;
+                if (!obstacle.passed && obstacle.x + obstacle.width < PLAYER_X) {
+                    obstacle.passed = true;
+                    score += 1;
+                    scoreElement.textContent = String(score);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestScoreElement.textContent = String(bestScore);
+                        try {
+                            localStorage.setItem(BEST_SCORE_KEY, String(bestScore));
+                        } catch (error) {}
+                    }
+                }
+
+                const obstacleTop = GROUND_Y - obstacle.height;
+                const overlapsX = PLAYER_X + PLAYER_WIDTH - 5 > obstacle.x && PLAYER_X + 5 < obstacle.x + obstacle.width;
+                const overlapsY = playerTop + PLAYER_HEIGHT > obstacleTop && playerTop + 5 < GROUND_Y;
+                if (overlapsX && overlapsY) {
+                    endGame();
+                    break;
+                }
+            }
+            obstacles = obstacles.filter(obstacle => obstacle.x + obstacle.width > -10);
+        }
+
+        function drawCloud(x, y, scale) {
+            context.fillStyle = "rgba(255, 255, 255, 0.85)";
+            context.beginPath();
+            context.arc(x, y, 13 * scale, 0, Math.PI * 2);
+            context.arc(x + 16 * scale, y - 7 * scale, 18 * scale, 0, Math.PI * 2);
+            context.arc(x + 35 * scale, y, 13 * scale, 0, Math.PI * 2);
+            context.fill();
+        }
+
+        function drawPlayer() {
+            const x = PLAYER_X;
+            const y = GROUND_Y - PLAYER_HEIGHT - jumpHeight;
+            context.fillStyle = "rgba(32, 54, 71, 0.12)";
+            context.beginPath();
+            context.ellipse(x + PLAYER_WIDTH / 2, GROUND_Y + 2, 22 - Math.min(jumpHeight / 20, 10), 5, 0, 0, Math.PI * 2);
+            context.fill();
+
+            context.fillStyle = "#ff765f";
+            context.beginPath();
+            context.roundRect(x, y + 7, PLAYER_WIDTH, PLAYER_HEIGHT - 7, 11);
+            context.fill();
+            context.fillStyle = "#ffd35a";
+            context.beginPath();
+            context.arc(x + 20, y + 13, 14, Math.PI, 0);
+            context.fill();
+            context.fillStyle = "#203647";
+            context.beginPath();
+            context.arc(x + 25, y + 23, 2.2, 0, Math.PI * 2);
+            context.fill();
+            context.fillStyle = "#fff";
+            context.beginPath();
+            context.arc(x + 25.7, y + 22.2, 0.8, 0, Math.PI * 2);
+            context.fill();
+
+            const footOffset = gameState === "running" && jumpHeight === 0 && Math.floor(elapsed * 10) % 2 ? 5 : 0;
+            context.fillStyle = "#203647";
+            context.fillRect(x + 7, GROUND_Y - 4, 9, 6 + footOffset);
+            context.fillRect(x + 25, GROUND_Y - 4, 9, 6 + (footOffset ? 0 : 5));
+        }
+
+        function drawObstacle(obstacle) {
+            const x = obstacle.x;
+            const y = GROUND_Y - obstacle.height;
+            context.fillStyle = "#49ad82";
+            context.beginPath();
+            context.roundRect(x + 6, y, obstacle.width - 6, obstacle.height, 7);
+            context.fill();
+            context.fillRect(x, y + obstacle.height * 0.43, 11, 8);
+            context.fillRect(x + obstacle.width - 10, y + obstacle.height * 0.63, 10, 8);
+            context.fillStyle = "#327f67";
+            context.fillRect(x + 11, y + 9, 3, 5);
+            context.fillRect(x + obstacle.width - 7, y + 20, 3, 5);
+        }
+
+        function draw() {
+            context.clearRect(0, 0, WIDTH, HEIGHT);
+            context.fillStyle = "#dff5ff";
+            context.fillRect(0, 0, WIDTH, HEIGHT);
+            drawCloud((90 - elapsed * 8) % (WIDTH + 100), 66, 0.9);
+            drawCloud((390 - elapsed * 5 + WIDTH + 100) % (WIDTH + 100), 108, 0.7);
+            drawCloud((700 - elapsed * 7 + WIDTH + 100) % (WIDTH + 100), 53, 0.8);
+
+            context.fillStyle = "#c5edda";
+            context.beginPath();
+            context.moveTo(0, GROUND_Y);
+            context.quadraticCurveTo(170, 190, 340, GROUND_Y);
+            context.quadraticCurveTo(540, 205, 800, GROUND_Y);
+            context.fill();
+
+            context.fillStyle = "#8dd9ae";
+            context.fillRect(0, GROUND_Y, WIDTH, HEIGHT - GROUND_Y);
+            context.fillStyle = "#4d9d77";
+            context.fillRect(0, GROUND_Y, WIDTH, 5);
+            context.fillStyle = "rgba(255, 255, 255, 0.62)";
+            for (let mark = 0; mark < 14; mark += 1) {
+                const x = ((mark * 76 - elapsed * (gameState === "running" ? 290 + Math.min(elapsed * 8, 205) : 0)) % (WIDTH + 30) + WIDTH + 30) % (WIDTH + 30);
+                context.fillRect(x, GROUND_Y + 24, 27, 4);
+            }
+
+            for (const obstacle of obstacles) drawObstacle(obstacle);
+            drawPlayer();
+
+            if (gameState === "ready" || gameState === "over") {
+                context.fillStyle = "rgba(255, 255, 255, 0.78)";
+                context.fillRect(0, 0, WIDTH, HEIGHT);
+                context.textAlign = "center";
+                context.fillStyle = "#203647";
+                context.font = "700 30px sans-serif";
+                context.fillText(gameState === "ready" ? "준비됐나요?" : "게임 오버!", WIDTH / 2, 130);
+                context.font = "18px sans-serif";
+                context.fillStyle = "#526d7a";
+                context.fillText(gameState === "ready" ? "시작을 누르고 박수를 쳐보세요" : "점수 " + score + " · 다시 도전해봐요", WIDTH / 2, 164);
+            }
+        }
+
+        function frame(timestamp) {
+            const delta = previousFrame ? Math.min((timestamp - previousFrame) / 1000, 0.04) : 0;
+            previousFrame = timestamp;
+            update(delta);
+            draw();
+            requestAnimationFrame(frame);
+        }
+
+        startButton.addEventListener("click", startGame);
+        window.addEventListener("keydown", event => {
+            if (event.code === "Space" && !event.repeat) {
+                event.preventDefault();
+                jump();
+            }
         });
 
-        // Stop the recognition in 5 seconds.
-        // setTimeout(() => recognizer.stopListening(), 5000);
-    }
-</script>
+        requestAnimationFrame(frame);
+    </script>
+    <!-- 박수 인식 기준값은 CLAP_THRESHOLD(0.85), 점프 쿨타임은 JUMP_COOLDOWN_MS(600ms)에서 바꾸세요. -->
+</body>
+</html>
