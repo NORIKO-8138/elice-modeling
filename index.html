@@ -203,6 +203,7 @@
                     <span>박수 확률</span><strong id="clap-probability">0.00</strong>
                     <span>준비 상태</span><strong id="clap-armed">준비</strong>
                     <span>인식 횟수</span><strong id="clap-count">0</strong>
+                    <span>마지막 판단 후 지난 시간(ms)</span><strong id="decision-age">대기</strong>
                 </div>
             </div>
         </section>
@@ -235,6 +236,7 @@
         const clapProbabilityElement = document.getElementById("clap-probability");
         const clapArmedElement = document.getElementById("clap-armed");
         const clapCountElement = document.getElementById("clap-count");
+        const decisionAgeElement = document.getElementById("decision-age");
         const errorElement = document.getElementById("error-message");
 
         let gameState = "ready";
@@ -246,6 +248,7 @@
         let jumpHeight = 0;
         let jumpVelocity = 0;
         let lastJumpAt = -Infinity;
+        let lastDecisionAt = null;
         let clapArmed = true;
         let clapCount = 0;
         let previousFrame = 0;
@@ -279,6 +282,7 @@
         }
 
         function updateDetection(result) {
+            lastDecisionAt = performance.now();
             let highestIndex = 0;
             for (let index = 1; index < result.scores.length; index += 1) {
                 if (result.scores[index] > result.scores[highestIndex]) highestIndex = index;
@@ -307,7 +311,7 @@
             await recognizer.listen(updateDetection, {
                 probabilityThreshold: 0,
                 invokeCallbackOnNoiseAndUnknown: true,
-                overlapFactor: 0.5
+                overlapFactor: 0.9
             });
             isListening = true;
             if (gameState !== "running") stopListening();
@@ -363,6 +367,8 @@
             jumpHeight = 0;
             jumpVelocity = 0;
             lastJumpAt = -Infinity;
+            lastDecisionAt = null;
+            decisionAgeElement.textContent = "대기";
             clapArmed = true;
             clapCount = 0;
             clapProbabilityElement.textContent = "0.00";
@@ -395,10 +401,10 @@
         function update(delta) {
             if (gameState !== "running") return;
             elapsed += delta;
-            const speed = 285 + Math.min(elapsed * 8, 205);
+            const speed = 199.5 + Math.min(elapsed * 8, 205);
 
             jumpHeight += jumpVelocity * delta;
-            jumpVelocity -= 1650 * delta;
+            jumpVelocity -= 1375 * delta;
             if (jumpHeight <= 0) {
                 jumpHeight = 0;
                 jumpVelocity = 0;
@@ -535,6 +541,7 @@
         function frame(timestamp) {
             const delta = previousFrame ? Math.min((timestamp - previousFrame) / 1000, 0.04) : 0;
             previousFrame = timestamp;
+            decisionAgeElement.textContent = lastDecisionAt === null ? "대기" : String(Math.floor(timestamp - lastDecisionAt));
             update(delta);
             draw();
             requestAnimationFrame(frame);
