@@ -143,6 +143,9 @@
             min-height: 20px;
         }
 
+        .debug-line { flex-wrap: wrap; column-gap: 6px; }
+        .debug-line strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+
         .dot {
             width: 9px;
             height: 9px;
@@ -196,6 +199,11 @@
             <div class="status-list" aria-live="polite">
                 <div class="status-line"><span id="mic-dot" class="dot" aria-hidden="true"></span><span id="mic-status">시작 버튼을 누르면 마이크가 켜집니다</span></div>
                 <div class="status-line">인식된 소리: <span id="detected-sound" class="detection">-</span></div>
+                <div class="status-line debug-line">
+                    <span>박수 확률</span><strong id="clap-probability">0.00</strong>
+                    <span>준비 상태</span><strong id="clap-armed">준비</strong>
+                    <span>인식 횟수</span><strong id="clap-count">0</strong>
+                </div>
             </div>
         </section>
         <p id="error-message" class="error" role="alert"></p>
@@ -204,9 +212,10 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.4.0/dist/speech-commands.min.js"></script>
     <script>
+        const CLAP_JUMP_THRESHOLD = 0.8;
+        const CLAP_REARM_THRESHOLD = 0.3;
+        const CLAP_MIN_INTERVAL_MS = 800;
         const URL = location.href.substring(0, location.href.lastIndexOf("/") + 1) + "my_model/";
-        const CLAP_THRESHOLD = 0.85;
-        const JUMP_COOLDOWN_MS = 600;
         const WIDTH = 800;
         const HEIGHT = 300;
         const GROUND_Y = 252;
@@ -223,6 +232,9 @@
         const micStatusElement = document.getElementById("mic-status");
         const micDotElement = document.getElementById("mic-dot");
         const detectedSoundElement = document.getElementById("detected-sound");
+        const clapProbabilityElement = document.getElementById("clap-probability");
+        const clapArmedElement = document.getElementById("clap-armed");
+        const clapCountElement = document.getElementById("clap-count");
         const errorElement = document.getElementById("error-message");
 
         let gameState = "ready";
@@ -234,7 +246,8 @@
         let jumpHeight = 0;
         let jumpVelocity = 0;
         let lastJumpAt = -Infinity;
-        let clapLatched = false;
+        let clapArmed = true;
+        let clapCount = 0;
         let previousFrame = 0;
         let recognizer = null;
         let classLabels = [];
@@ -259,7 +272,7 @@
 
         function jump() {
             const now = performance.now();
-            if (gameState !== "running" || jumpHeight > 0 || now - lastJumpAt < JUMP_COOLDOWN_MS) return false;
+            if (gameState !== "running" || jumpHeight > 0 || now - lastJumpAt < CLAP_MIN_INTERVAL_MS) return false;
             jumpVelocity = 610;
             lastJumpAt = now;
             return true;
@@ -276,9 +289,15 @@
             detectedSoundElement.textContent = label + " " + confidence.toFixed(2);
 
             const clapConfidence = clapIndex >= 0 ? result.scores[clapIndex] : 0;
-            if (clapConfidence < CLAP_THRESHOLD) clapLatched = false;
-            if (clapConfidence >= CLAP_THRESHOLD && !clapLatched) {
-                clapLatched = true;
+            clapProbabilityElement.textContent = clapConfidence.toFixed(2);
+            if (clapConfidence < CLAP_REARM_THRESHOLD) {
+                clapArmed = true;
+                clapArmedElement.textContent = "준비";
+            } else if (clapConfidence >= CLAP_JUMP_THRESHOLD && clapArmed) {
+                clapArmed = false;
+                clapArmedElement.textContent = "대기";
+                clapCount += 1;
+                clapCountElement.textContent = String(clapCount);
                 jump();
             }
         }
@@ -286,7 +305,7 @@
         async function startListening() {
             if (!recognizer || isListening || gameState !== "running") return;
             await recognizer.listen(updateDetection, {
-                probabilityThreshold: 0.5,
+                probabilityThreshold: 0,
                 invokeCallbackOnNoiseAndUnknown: true,
                 overlapFactor: 0.5
             });
@@ -344,7 +363,11 @@
             jumpHeight = 0;
             jumpVelocity = 0;
             lastJumpAt = -Infinity;
-            clapLatched = false;
+            clapArmed = true;
+            clapCount = 0;
+            clapProbabilityElement.textContent = "0.00";
+            clapArmedElement.textContent = "준비";
+            clapCountElement.textContent = "0";
             scoreElement.textContent = "0";
             errorElement.textContent = "";
             startButton.textContent = "진행 중";
@@ -527,6 +550,6 @@
 
         requestAnimationFrame(frame);
     </script>
-    <!-- 박수 인식 기준값은 CLAP_THRESHOLD(0.85), 점프 쿨타임은 JUMP_COOLDOWN_MS(600ms)에서 바꾸세요. -->
+    <!-- 박수 점프 기준, 재준비 기준, 최소 점프 간격은 CLAP_JUMP_THRESHOLD, CLAP_REARM_THRESHOLD, CLAP_MIN_INTERVAL_MS 상수에서 바꾸세요. -->
 </body>
 </html>
